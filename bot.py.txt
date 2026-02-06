@@ -1,0 +1,133 @@
+import asyncio
+import datetime
+import os
+import aiosqlite
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import CommandStart
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+TOKEN = os.getenv("BOT_TOKEN")
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+DB_NAME = "water.db"
+
+
+async def init_db():
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            last_reminder DATE,
+            last_drink DATE,
+            streak INTEGER DEFAULT 0,
+            total_days INTEGER DEFAULT 0
+        )
+        """)
+        await db.commit()
+
+
+def get_level(streak):
+    if streak >= 30:
+        return "🏆 Машина гидратации"
+    elif streak >= 21:
+        return "💎 Алхимик воды"
+    elif streak >= 7:
+        return "🔥 Осознанный"
+    else:
+        return "🌱 Новичок"
+
+
+def drink_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💧 Выпил воду", callback_data="drink")]
+        ]
+    )
+
+
+async def check_and_remind(user_id):
+    today = datetime.date.today()
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT last_reminder FROM users WHERE user_id = ?",
+            (user_id,)
+        )
+        row = await cursor.fetchone()
+
+        if row is None or row[0] != str(today):
+            await bot.send_message(
+                user_id,
+                "💧 Доброе утро!\nСтакан воды = запуск организма 🚀",
+                reply_markup=drink_keyboard()
+            )
+
+            await db.execute(
+                "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+                (user_id,)
+            )
+            await db.execute(
+                "UPDATE users SET last_reminder = ? WHERE user_id = ?",
+                (today, user_id)
+            )
+            await db.commit()
+
+
+@dp.callback_query(lambda c: c.data == "drink")
+async def drink(callback: types.CallbackQuery):
+    today = datetime.date.today()
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "SELECT last_drink, streak, total_days FROM users WHERE user_id = ?",
+            (callback.from_user.id,)
+        )
+        last_drink, streak, total_days = await cursor.fetchone()
+
+        if last_drink == str(today):
+            await callback.answer("Уже отмечено 👍", show_alert=True)
+            return
+
+        if last_drink == str(today - datetime.timedelta(days=1)):
+            streak += 1
+        else:
+            streak = 1
+
+        total_days += 1
+
+        await db.execute("""
+            UPDATE users
+            SET last_drink = ?, streak = ?, total_days = ?
+            WHERE user_id = ?
+        """, (today, streak, total_days, callback.from_user.id))
+        await db.commit()
+
+    await callback.message.answer(
+        f"✅ Отлично!\n🔥 Серия: {streak}\n🏅 Уровень: {get_level(streak)}"
+    )
+    await callback.answer()
+
+
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    await message.answer(
+        "Я помогу выработать привычку пить воду 💧\n"
+        "Каждое утро напоминаю и веду серию 🔥"
+    )
+    await check_and_remind(message.from_user.id)
+
+
+@dp.message()
+async def any_msg(message: types.Message):
+    await check_and_remind(message.from_user.id)
+
+
+async def main():
+    await init_db()
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
